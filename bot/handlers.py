@@ -1,13 +1,19 @@
 from aiogram import Router, F
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import Message
 from bot.models import User
 from bot.database import SessionLocal
 from bot.config import ADMIN_IDS
 import re
 from sqlalchemy import select
-import random
+
+from bot.services import game
 
 router = Router()
+class GameState(StatesGroup):
+    waiting_for_guess = State()
+    waiting_for_bet = State()
 
 def setup_handlers(dp):
     dp.include_router(router)
@@ -24,6 +30,74 @@ async def start_handler(msg: Message):
             session.add(user)
             await session.commit()
         await msg.answer("Вітаю в грі! Ваш баланс: 100 грн\nНапишіть /play щоб зіграти.")
+
+@router.message(F.text == "/less_more")
+async def start_game(msg: Message, state: FSMContext):
+    first_number = game.generate_number()  # Генеруємо перше число з game.py
+    await state.update_data(first_number=first_number)
+    await msg.answer(
+        f"🎲 Перше число: <b>{first_number}</b>\n"
+        "Виберіть варіант: менше, більше або рівно (відносно <b>другого числа</b>)"
+    )
+    await state.set_state(GameState.waiting_for_guess)
+
+
+@router.message(GameState.waiting_for_guess)
+async def choose_guess(msg: Message, state: FSMContext):
+    guess = msg.text.lower()
+    if guess not in ["менше", "більше", "рівно"]:
+        await msg.answer("❌ Введіть лише: менше, більше або рівно")
+        return
+    await state.update_data(guess=guess)
+    await msg.answer("💰 Введіть суму ставки:")
+    await state.set_state(GameState.waiting_for_bet)
+
+
+@router.message(GameState.waiting_for_bet)
+async def enter_bet(msg: Message, state: FSMContext):
+    try:
+        bet = float(msg.text)
+        if bet <= 0:
+            raise ValueError
+    except:
+        await msg.answer("❌ Введіть коректну суму.")
+        return
+
+    data = await state.get_data()
+    first_number = data["first_number"]
+    guess = data["guess"]
+    second_number = game.generate_number()  # Генеруємо друге число
+
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == msg.from_user.id)
+        )
+        user = result.scalar_one_or_none()
+        if not user:
+            await msg.answer("❌ Користувач не знайдений.")
+            return
+        if user.balance < bet:
+            await msg.answer("❌ Недостатньо коштів на балансі.")
+            return
+
+        # Викликаємо функцію evaluate_guess з game.py
+        win, reward, f1, f2 = game.evaluate_guess(guess, bet, first_number, second_number)
+        if win:
+            user.balance += reward
+            result_msg = f"🎉 Ви виграли {reward:.2f} грн!"
+        else:
+            user.balance -= bet
+            result_msg = f"😢 Ви програли {bet:.2f} грн."
+
+        await session.commit()
+
+    await msg.answer(
+        f"🎲 Перше число: <b>{f1}</b>\n"
+        f"🎯 Друге число: <b>{f2}</b>\n"
+        f"Ваша ставка: <b>{guess}</b>\n\n"
+        f"{result_msg}"
+    )
+    await state.clear()
 
 @router.message(F.text == "/balance")
 async def balance_handler(msg: Message):
