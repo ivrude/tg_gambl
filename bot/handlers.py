@@ -20,7 +20,7 @@ class GameState(StatesGroup):
 def setup_handlers(dp):
     dp.include_router(router)
 
-@router.message(F.text == "/start")
+@router.message(F.text.in_(['/start', '📋 Меню']))
 async def start_handler(msg: Message):
     async with SessionLocal() as session:
         result = await session.execute(
@@ -103,7 +103,10 @@ async def enter_bet(msg: Message, state: FSMContext):
 
         await session.commit()
     keyboard = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="🎲 Зіграти ще")]],
+        keyboard=[
+            [KeyboardButton(text="🎲 Зіграти ще")],
+            [KeyboardButton(text="📋 Меню")]
+        ],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
@@ -132,7 +135,7 @@ async def balance_handler(msg: Message):
         else:
             await msg.answer("❌ Вас не знайдено в базі. Зареєструйтесь спочатку.")
 
-@router.message(F.text == "/deposit")
+@router.message(F.text.in_(["💳 Депозит", "/deposit"]))
 async def deposit_handler(msg: Message):
     async with SessionLocal() as session:
         result = await session.execute(select(BankCard).limit(1))
@@ -289,6 +292,7 @@ async def games_menu(msg: Message):
             [KeyboardButton(text="🎲 Більше / Менше")],
             [KeyboardButton(text="🪙 Монетка")],
             [KeyboardButton(text="🎰 Казино")],
+            [KeyboardButton(text="📋 Меню")]
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
@@ -302,3 +306,31 @@ async def coin_handler(msg: Message):
 @router.message(F.text == "🎰 Казино")
 async def casino_handler(msg: Message):
     await msg.answer("Гра в казино поки що на етапі розробки.")
+
+@router.message(F.text.in_(["🛠 Адмін панель", "/admin"]))
+async def admin_panel_handler(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        await msg.answer("🚫 У вас немає доступу до адмін панелі.")
+        return
+
+    buttons = [
+        [KeyboardButton(text="🔍 Знайти користувача")],
+        [KeyboardButton(text="💰 Змінити баланс користувача")],
+        [KeyboardButton(text="💳 Змінити картку")],
+        [KeyboardButton(text="📋 Меню")],
+    ]
+    keyboard = ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+
+    await msg.answer("🛠 Адмін панель. Оберіть дію:", reply_markup=keyboard)
+
+@router.message(F.text == "🔍 Знайти користувача")
+async def casino_handler(msg: Message):
+    await msg.answer("Введіть: /find_user 2233445566")
+
+@router.message(F.text == "💰 Змінити баланс користувача")
+async def casino_handler(msg: Message):
+    await msg.answer("Введіть: /change_user 123456789 +100")
+
+@router.message(F.text == "💳 Змінити картку")
+async def casino_handler(msg: Message):
+    await msg.answer("Введіть: /set_card 4444 1111 2222 3333")
