@@ -17,6 +17,7 @@ dp = Dispatcher(storage=MemoryStorage())
 
 setup_handlers(dp)
 
+
 if __name__ == "__main__":
     import asyncio
     from bot.database import create_db

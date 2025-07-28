@@ -1,8 +1,10 @@
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from aiogram.types import Message
-from bot.models import User
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from bot.models import User, BankCard
 from bot.database import SessionLocal
 from bot.config import ADMIN_IDS
 import re
@@ -29,9 +31,18 @@ async def start_handler(msg: Message):
             user = User(telegram_id=msg.from_user.id, balance=100)
             session.add(user)
             await session.commit()
-        await msg.answer("Вітаю в грі! Ваш баланс: 100 грн\nНапишіть /play щоб зіграти.")
+    buttons = [
+        [KeyboardButton(text="🎮 Ігри")],
+        [KeyboardButton(text="💳 Депозит")]
+    ]
+    if msg.from_user.id in ADMIN_IDS:
+        buttons.append([KeyboardButton(text="🛠 Адмін панель")])
 
-@router.message(F.text == "/less_more")
+    keyboard = ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+
+    await msg.answer("Вітаю в грі! Обери опцію:", reply_markup=keyboard)
+
+@router.message(F.text.in_(["🎲 Більше / Менше", "🎲 Зіграти ще"]))
 async def start_game(msg: Message, state: FSMContext):
     first_number = game.generate_number()  # Генеруємо перше число з game.py
     await state.update_data(first_number=first_number)
@@ -77,7 +88,8 @@ async def enter_bet(msg: Message, state: FSMContext):
             await msg.answer("❌ Користувач не знайдений.")
             return
         if user.balance < bet:
-            await msg.answer("❌ Недостатньо коштів на балансі.")
+            await state.clear()  # Вийти з FSM, щоб не чекати введення суми
+            await msg.answer("❌ Недостатньо коштів на балансі, для поповнення /deposit.")
             return
 
         # Викликаємо функцію evaluate_guess з game.py
@@ -90,12 +102,18 @@ async def enter_bet(msg: Message, state: FSMContext):
             result_msg = f"😢 Ви програли {bet:.2f} грн."
 
         await session.commit()
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="🎲 Зіграти ще")]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
 
     await msg.answer(
         f"🎲 Перше число: <b>{f1}</b>\n"
         f"🎯 Друге число: <b>{f2}</b>\n"
         f"Ваша ставка: <b>{guess}</b>\n\n"
-        f"{result_msg}"
+        f"{result_msg}",
+        reply_markup = keyboard,
     )
     await state.clear()
 
@@ -116,11 +134,17 @@ async def balance_handler(msg: Message):
 
 @router.message(F.text == "/deposit")
 async def deposit_handler(msg: Message):
+    async with SessionLocal() as session:
+        result = await session.execute(select(BankCard).limit(1))
+        card = result.scalar_one_or_none()
+        card_number = card.card_number if card else "❌ Картку не встановлено"
+
     await msg.answer(
-        "💳 Для поповнення балансу:\n"
-        "1. Здійсніть переказ на карту: <b>5375 xxxx xxxx xxxx</b>\n"
-        "2. Надішліть фото квитанції у чат."
+        f"💳 Для поповнення балансу:\n"
+        f"1. Здійсніть переказ на карту: <b>{card_number}</b>\n"
+        f"2. Надішліть фото квитанції у чат."
     )
+
 
 # --- Отримання квитанції ---
 @router.message(F.photo)
@@ -168,3 +192,113 @@ async def approve_deposit(msg: Message):
             await msg.answer(f"✅ Баланс користувача {telegram_id} поповнено на {amount} грн.")
         else:
             await msg.answer("❌ Користувача не знайдено.")
+
+
+@router.message(F.text.startswith("/set_card"))
+async def set_bank_card(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        return await msg.answer("⛔️ У вас немає прав на цю дію.")
+
+    try:
+        _, card_number = msg.text.split(maxsplit=1)
+    except ValueError:
+        return await msg.answer("❗ Формат: /set_card 4444 1111 2222 3333")
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(BankCard).limit(1))
+        card = result.scalar_one_or_none()
+
+        if card:
+            card.card_number = card_number
+        else:
+            card = BankCard(card_number=card_number)
+            session.add(card)
+
+        await session.commit()
+
+    await msg.answer(f"✅ Банківську картку оновлено:\n<code>{card_number}</code>")
+
+@router.message(F.text.startswith("/find_user"))
+async def find_user_handler(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        return await msg.answer("⛔️ У вас немає прав на цю дію.")
+
+    try:
+        _, telegram_id_str = msg.text.split(maxsplit=1)
+        telegram_id = int(telegram_id_str)
+    except (ValueError, IndexError):
+        return await msg.answer("❗ Формат: /find_user 2233445566")
+
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == telegram_id)
+        )
+        user = result.scalar_one_or_none()
+
+        if user:
+            await msg.answer(
+                f"👤 Інформація про користувача:\n"
+                f"<b>Telegram ID:</b> <code>{user.telegram_id}</code>\n"
+                f"<b>Баланс:</b> <code>{user.balance} грн</code>",
+                parse_mode="HTML"
+            )
+        else:
+            await msg.answer("❌ Користувача з таким ID не знайдено.")
+
+@router.message(F.text.startswith("/change_user"))
+async def change_user_balance(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        return await msg.answer("⛔️ У вас немає прав на цю дію.")
+
+    try:
+        _, user_id_str, change_str = msg.text.split(maxsplit=2)
+        telegram_id = int(user_id_str)
+
+        if not (change_str.startswith('+') or change_str.startswith('-')):
+            raise ValueError("Немає + або - перед сумою")
+
+        amount = float(change_str)
+    except Exception:
+        return await msg.answer("❗ Формат: /change_user telegram_id +/-сума\n"
+                                "Приклад: /change_user 123456789 +100")
+
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == telegram_id)
+        )
+        user = result.scalar_one_or_none()
+
+        if not user:
+            return await msg.answer("❌ Користувача з таким ID не знайдено.")
+
+        user.balance += amount
+        await session.commit()
+
+        action = "додано" if amount > 0 else "віднято"
+        await msg.answer(
+            f"✅ Баланс користувача <code>{user.telegram_id}</code> оновлено.\n"
+            f"Було {action} <b>{abs(amount)} грн</b>\n"
+            f"📟 Новий баланс: <code>{user.balance:.2f} грн</code>",
+            parse_mode="HTML"
+        )
+
+@router.message(F.text.in_(["🎮 Ігри","/games"]))
+async def games_menu(msg: Message):
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🎲 Більше / Менше")],
+            [KeyboardButton(text="🪙 Монетка")],
+            [KeyboardButton(text="🎰 Казино")],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+    await msg.answer("🎮 Обери гру:", reply_markup=keyboard)
+
+@router.message(F.text == "🪙 Монетка")
+async def coin_handler(msg: Message):
+    await msg.answer("Гра в монетку на етапі розробки.")
+
+@router.message(F.text == "🎰 Казино")
+async def casino_handler(msg: Message):
+    await msg.answer("Гра в казино поки що на етапі розробки.")
